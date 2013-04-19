@@ -95,7 +95,7 @@ HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE De
 			RECT rect;
 			GetClientRect(targetWindow,&rect);
 			TwWindowSize(rect.right-rect.left,rect.bottom-rect.top);
-			OldWindowProc = (WNDPROC)SetWindowLongPtr(targetWindow,GWL_WNDPROC,(LONG_PTR)WindowProc);
+			OldWindowProc = (WNDPROC)SetWindowLongPtr(targetWindow,GWLP_WNDPROC,(LONG_PTR)WindowProc);
 		}
 	}
 
@@ -129,7 +129,7 @@ int WINAPI DllMain(HINSTANCE hInstance, DWORD fdwReason, PVOID pvReserved)
 	{
 		if( NULL != OldWindowProc && NULL != targetWindow )
 		{
-			SetWindowLongPtr(targetWindow,GWL_WNDPROC,(LONG_PTR)OldWindowProc);	// not doing this could be bad so do it...
+			SetWindowLongPtr(targetWindow,GWLP_WNDPROC,(LONG_PTR)OldWindowProc);	// not doing this could be bad so do it...
 		}
 	}
 	return TRUE;
