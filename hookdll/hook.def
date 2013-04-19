@@ -1,6 +1,7 @@
 EXPORTS
-	HookProc  	@1
-	InstallHook @2
-	ReleaseHook @3
+	WinHookProc		@1
+	WinEventProc	@2
+	InstallHook		@3
+	ReleaseHook		@4
 SECTIONS
 	.shared SHARED

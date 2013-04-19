@@ -8,7 +8,7 @@
 #include "AntTweakBar.h"
 
 extern "C" LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-extern "C" LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam);
+extern "C" LRESULT CALLBACK WinHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 extern "C" void InstallHook(HWND hWnd, const char *pName);
 extern "C" void ReleaseHook();
 
@@ -17,14 +17,22 @@ typedef IDirect3D9 * (WINAPI *tDirect3DCreate9)(UINT SDKVersion);
 typedef HRESULT (__stdcall *tCreateDevice)(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, 
 										   D3DPRESENT_PARAMETERS* pPresentationParameters, IDirect3DDevice9** ppReturnedDeviceInterface);
 typedef HRESULT (__stdcall *tEndScene)(IDirect3DDevice9 *thisPtr);
+typedef HRESULT (__stdcall *tReset)(IDirect3DDevice9 *thisPtr, D3DPRESENT_PARAMETERS* pPresentationParameters);
+typedef BOOL (__stdcall *tCreateProcessA)(LPCSTR lpApplicationName,LPSTR lpCommandLine,LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	LPSECURITY_ATTRIBUTES lpThreadAttributes,BOOL bInheritHandles,DWORD dwCreationFlags,LPVOID lpEnvironment,LPCSTR lpCurrentDirectory,
+	LPSTARTUPINFOA lpStartupInfo,LPPROCESS_INFORMATION lpProcessInformation);
+typedef	BOOL (__stdcall *tCreateProcessW)(LPCWSTR lpApplicationName,LPWSTR lpCommandLine,LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	LPSECURITY_ATTRIBUTES lpThreadAttributes,BOOL bInheritHandles,DWORD dwCreationFlags,LPVOID lpEnvironment,LPCWSTR lpCurrentDirectory,
+	LPSTARTUPINFOW lpStartupInfo,LPPROCESS_INFORMATION lpProcessInformation);
 
 #pragma data_seg (".shared")
 // only INITIALIZED variables in this block will actually end up in the shared section!!!
 // http://abdelrahmanogail.wordpress.com/2010/12/28/sharing-variables-between-several-instances-from-the-same-exe-or-dll/
 static HHOOK hHook = NULL;
 static HINSTANCE hins = NULL;
-static HWND hwnd = NULL;
+static HWND hManagerWindow = NULL;
 static char targetName[MAX_PATH] = "";
+ HWINEVENTHOOK hEventHook;
 #pragma data_seg ()
 
 // non-shared globals
@@ -34,6 +42,9 @@ static IDirect3DDevice9 *pD3D9Dev = NULL;
 static DetourXS * dDirect3DCreate9 = NULL;
 static DetourXS * dCreateDevice = NULL;
 static DetourXS * dEndScene = NULL;
+static DetourXS * dReset = NULL;
+static DetourXS * dCreateProcessA = NULL;
+static DetourXS * dCreateProcessW = NULL;
 static TwBar *pBar = NULL;
 static bool drawTwBar = false;
 static float gColor[] = { 1, 0, 0 };
@@ -41,27 +52,77 @@ static HWND targetWindow = NULL;
 static WNDPROC OldWindowProc = NULL;
 
 // hooked functions
+tCreateProcessA oCreateProcessA;
+BOOL __stdcall hCreateProcessA(LPCSTR lpApplicationName,LPSTR lpCommandLine,LPSECURITY_ATTRIBUTES lpProcessAttributes,
+				  LPSECURITY_ATTRIBUTES lpThreadAttributes,BOOL bInheritHandles,DWORD dwCreationFlags,LPVOID lpEnvironment,LPCSTR lpCurrentDirectory,
+				  LPSTARTUPINFOA lpStartupInfo,LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL rval = FALSE;
+
+	TCHAR dbgBuf[MAX_PATH];
+	_stprintf_s(dbgBuf,"CreateProcessA(%s)...\n", lpApplicationName);
+	OutputDebugString(dbgBuf);
+
+	rval = oCreateProcessA(lpApplicationName,lpCommandLine,lpProcessAttributes,
+		lpThreadAttributes,bInheritHandles,dwCreationFlags,lpEnvironment,lpCurrentDirectory,
+		lpStartupInfo,lpProcessInformation);
+
+	return rval;
+}
+
+tCreateProcessW oCreateProcessW;
+BOOL __stdcall hCreateProcessW(LPCWSTR lpApplicationName,LPWSTR lpCommandLine,LPSECURITY_ATTRIBUTES lpProcessAttributes,
+				  LPSECURITY_ATTRIBUTES lpThreadAttributes,BOOL bInheritHandles,DWORD dwCreationFlags,LPVOID lpEnvironment,LPCWSTR lpCurrentDirectory,
+				  LPSTARTUPINFOW lpStartupInfo,LPPROCESS_INFORMATION lpProcessInformation)
+{
+	BOOL rval = FALSE;
+
+	TCHAR dbgBuf[MAX_PATH];
+	_stprintf_s(dbgBuf,"CreateProcessW(%ls)...\n", lpApplicationName);
+	OutputDebugString(dbgBuf);
+
+	rval = oCreateProcessW(lpApplicationName,lpCommandLine,lpProcessAttributes,
+		lpThreadAttributes,bInheritHandles,dwCreationFlags,lpEnvironment,lpCurrentDirectory,
+		lpStartupInfo,lpProcessInformation);
+
+	return rval;
+}
+
 tEndScene oEndScene;
 HRESULT __stdcall hEndScene(IDirect3DDevice9 *thisPtr)
 {
 	HRESULT rval = S_OK;
 	static DWORD frame_count = 0;
 
-	if(frame_count++ > 100)
+	if(frame_count++ > 1000)
 	{
 		OutputDebugStringW(L"hEndScene() called.\n");
 		frame_count = 0;
 	}
 
+	rval = oEndScene(thisPtr);
 	if( drawTwBar )
 	{
 		TwDraw();
 	}
 
-	rval = oEndScene(thisPtr);
+	return rval;
+}
+
+tReset oReset;
+HRESULT __stdcall hReset(IDirect3DDevice9 *thisPtr, D3DPRESENT_PARAMETERS* pPresentationParameters)
+{
+	HRESULT rval = S_OK;
+
+	OutputDebugStringW(L"hReset() called.\n");
+
+	TwWindowSize(0,0);
+	rval = oReset(thisPtr,pPresentationParameters);
+	TwWindowSize(pPresentationParameters->BackBufferWidth, pPresentationParameters->BackBufferHeight);
 
 	return rval;
 }
+
 
 tCreateDevice oCreateDevice;
 HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, 
@@ -80,8 +141,10 @@ HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE De
 		{
 			dEndScene = new DetourXS((void*)vtable[42], hEndScene);
 			oEndScene = (tEndScene) dEndScene->GetTrampoline();
+			dReset = new DetourXS((void*)vtable[16], hReset);
+			oReset = (tReset) dReset->GetTrampoline();
 		}
-		
+
 		TwInit(TW_DIRECT3D9, pD3D9Dev);
 		pBar = TwNewBar("TESTBAR");
 		TwDefine(" GLOBAL help='This example shows how to integrate AntTweakBar in a DirectX9 application.' "); // Message added to the help bar.
@@ -94,7 +157,7 @@ HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE De
 		{
 			RECT rect;
 			GetClientRect(targetWindow,&rect);
-			TwWindowSize(rect.right-rect.left,rect.bottom-rect.top);
+			TwWindowSize(rect.right,rect.bottom);
 			OldWindowProc = (WNDPROC)SetWindowLongPtr(targetWindow,GWLP_WNDPROC,(LONG_PTR)WindowProc);
 		}
 	}
@@ -146,13 +209,17 @@ extern "C" LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, L
 	}
 	else
 	{
-		handled = TwEventWin(hWnd,message,wParam,lParam);
+		if( drawTwBar )
+		{
+			// don't bother processing events if the bar isn't being drawn
+			handled = TwEventWin(hWnd,message,wParam,lParam);
+		}
 	}
 
 	return handled ? 0 : CallWindowProc(OldWindowProc, hWnd, message, wParam, lParam);
 }
 
-extern "C" LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam)
+extern "C" LRESULT CALLBACK WinHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
 	if( HCBT_CREATEWND == nCode )
 	{
@@ -170,9 +237,24 @@ extern "C" LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam)
 					{
 						dDirect3DCreate9 = new DetourXS(_Direct3DCreate9, hDirect3DCreate9);
 						oDirect3DCreate9 = (tDirect3DCreate9) dDirect3DCreate9->GetTrampoline();
-						inTarget = true;
-						SendMessage(hwnd,0xBEEF,GetCurrentProcessId(),0);
+						OutputDebugStringW(L"Hooked Direct3DCreate9().\n");
 					}
+					tCreateProcessA _CreateProcessA= (tCreateProcessA)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")),"CreateProcessA");
+					if( _CreateProcessA != NULL )
+					{
+						dCreateProcessA = new DetourXS(_CreateProcessA, hCreateProcessA);
+						oCreateProcessA = (tCreateProcessA) dCreateProcessA->GetTrampoline();
+						OutputDebugStringW(L"Hooked CreateProcessA().\n");
+					}
+					tCreateProcessW _CreateProcessW= (tCreateProcessW)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")),"CreateProcessW");
+					if( _CreateProcessW != NULL )
+					{
+						dCreateProcessW = new DetourXS(_CreateProcessW, hCreateProcessW);
+						oCreateProcessW = (tCreateProcessW) dCreateProcessW->GetTrampoline();
+						OutputDebugStringW(L"Hooked CreateProcessW().\n");
+					}
+					inTarget = true;
+					SendMessage(hManagerWindow,0xBEEF,GetCurrentProcessId(),0);
 				}
 			}
 		}
@@ -181,36 +263,72 @@ extern "C" LRESULT CALLBACK HookProc(int nCode, WPARAM wParam, LPARAM lParam)
 	return CallNextHookEx(hHook, nCode, wParam, lParam);
 }
 
+extern "C" VOID CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime)
+{
+	char szPath[MAX_PATH];
+
+	if( GetModuleFileNameA( NULL, szPath, MAX_PATH ) )
+	{
+		if( strstr(szPath,targetName) )
+		{
+			TCHAR dbgBuf[256];
+			_stprintf_s(dbgBuf,"event = 0x%08X, hwnd = 0x%08X\n", event, hwnd);
+			OutputDebugString(dbgBuf);
+		}
+	}
+}
+
+//#define USE_EVENT_HOOK
 extern "C" void InstallHook(HWND hWnd, const char *pName)
 {
-	hwnd = hWnd;
+	hManagerWindow = hWnd;
 	targetName[0] = 0;
 	if( pName )
 	{
 		strcpy_s(targetName,pName);
 	}
 	TCHAR dbgBuf[256];
-	_stprintf_s(dbgBuf,"hwnd = 0x%08X\n", hwnd);
+	_stprintf_s(dbgBuf,"hwnd = 0x%08X\n", hManagerWindow);
 	OutputDebugString(dbgBuf);
 	_stprintf_s(dbgBuf,"targetName = %hs\n", targetName);
 	OutputDebugString(dbgBuf);
 
-	hHook = SetWindowsHookEx(WH_CBT, (HOOKPROC)HookProc, hins, 0);
+#ifdef USE_EVENT_HOOK
+	hEventHook = SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_CREATE,hins,(WINEVENTPROC)GetProcAddress(hins,"WinEventProc"),0,0,WINEVENT_INCONTEXT);
+	if (NULL == hEventHook) 
+	{
+		TCHAR msg[256];
+		wsprintf(msg, TEXT("Cannot install hook, code: %d"), GetLastError());
+		MessageBox(hManagerWindow, msg, TEXT("error"), MB_ICONERROR);
+	}
+
+#else
+	hHook = SetWindowsHookEx(WH_CBT, (HOOKPROC)WinHookProc, hins, 0);
 	if (NULL == hHook) 
 	{
 		TCHAR msg[256];
 		wsprintf(msg, TEXT("Cannot install hook, code: %d"), GetLastError());
-		MessageBox(hwnd, msg, TEXT("error"), MB_ICONERROR);
+		MessageBox(hManagerWindow, msg, TEXT("error"), MB_ICONERROR);
 	}
+#endif
 }
 
 extern "C" void ReleaseHook()
 {
+
+#ifdef USE_EVENT_HOOK
+if (hEventHook != NULL) 
+	{
+		BOOL bRes = UnhookWinEvent(hEventHook);
+		if (!bRes) MessageBox(hManagerWindow, TEXT("Cannot remove hook."), TEXT("error"), MB_ICONERROR);
+	}
+#else
 	if (hHook != NULL) 
 	{
 		BOOL bRes = UnhookWindowsHookEx(hHook);
-		if (!bRes) MessageBox(hwnd, TEXT("Cannot remove hook."), TEXT("error"), MB_ICONERROR);
+		if (!bRes) MessageBox(hManagerWindow, TEXT("Cannot remove hook."), TEXT("error"), MB_ICONERROR);
 	}
+#endif
 }
 
 
@@ -403,5 +521,86 @@ DECLARE_INTERFACE_(IDirect3DDevice9, IUnknown)
 	BOOL DialogBoxMode;
 #endif
 };
+
+
+DECLARE_INTERFACE_(ID3DXFont, IUnknown)
+{
+	// IUnknown
+000	STDMETHOD(QueryInterface)(THIS_ REFIID iid, LPVOID *ppv) PURE;
+001	STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+002	STDMETHOD_(ULONG, Release)(THIS) PURE;
+
+	// ID3DXFont
+003	STDMETHOD(GetDevice)(THIS_ LPDIRECT3DDEVICE9 *ppDevice) PURE;
+004	STDMETHOD(GetDescA)(THIS_ D3DXFONT_DESCA *pDesc) PURE;
+005	STDMETHOD(GetDescW)(THIS_ D3DXFONT_DESCW *pDesc) PURE;
+006	STDMETHOD_(BOOL, GetTextMetricsA)(THIS_ TEXTMETRICA *pTextMetrics) PURE;
+007	STDMETHOD_(BOOL, GetTextMetricsW)(THIS_ TEXTMETRICW *pTextMetrics) PURE;
+
+008	STDMETHOD_(HDC, GetDC)(THIS) PURE;
+009	STDMETHOD(GetGlyphData)(THIS_ UINT Glyph, LPDIRECT3DTEXTURE9 *ppTexture, RECT *pBlackBox, POINT *pCellInc) PURE;
+
+010	STDMETHOD(PreloadCharacters)(THIS_ UINT First, UINT Last) PURE;
+011	STDMETHOD(PreloadGlyphs)(THIS_ UINT First, UINT Last) PURE;
+012	STDMETHOD(PreloadTextA)(THIS_ LPCSTR pString, INT Count) PURE;
+013	STDMETHOD(PreloadTextW)(THIS_ LPCWSTR pString, INT Count) PURE;
+
+014	STDMETHOD_(INT, DrawTextA)(THIS_ LPD3DXSPRITE pSprite, LPCSTR pString, INT Count, LPRECT pRect, DWORD Format, D3DCOLOR Color) PURE;
+015	STDMETHOD_(INT, DrawTextW)(THIS_ LPD3DXSPRITE pSprite, LPCWSTR pString, INT Count, LPRECT pRect, DWORD Format, D3DCOLOR Color) PURE;
+
+016	STDMETHOD(OnLostDevice)(THIS) PURE;
+017	STDMETHOD(OnResetDevice)(THIS) PURE;
+
+#ifdef __cplusplus
+#ifdef UNICODE
+	HRESULT GetDesc(D3DXFONT_DESCW *pDesc) { return GetDescW(pDesc); }
+	HRESULT PreloadText(LPCWSTR pString, INT Count) { return PreloadTextW(pString, Count); }
+#else
+	HRESULT GetDesc(D3DXFONT_DESCA *pDesc) { return GetDescA(pDesc); }
+	HRESULT PreloadText(LPCSTR pString, INT Count) { return PreloadTextA(pString, Count); }
+#endif
+#endif //__cplusplus
+};
+
+DECLARE_INTERFACE_(ID3DXLine, IUnknown)
+{
+	// IUnknown
+000	STDMETHOD(QueryInterface)(THIS_ REFIID iid, LPVOID *ppv) PURE;
+001	STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+002	STDMETHOD_(ULONG, Release)(THIS) PURE;
+
+		// ID3DXLine
+003	STDMETHOD(GetDevice)(THIS_ LPDIRECT3DDEVICE9* ppDevice) PURE;
+
+004	STDMETHOD(Begin)(THIS) PURE;
+
+005	STDMETHOD(Draw)(THIS_ CONST D3DXVECTOR2 *pVertexList,
+		DWORD dwVertexListCount, D3DCOLOR Color) PURE;
+
+006	STDMETHOD(DrawTransform)(THIS_ CONST D3DXVECTOR3 *pVertexList,
+		DWORD dwVertexListCount, CONST D3DXMATRIX* pTransform, 
+		D3DCOLOR Color) PURE;
+
+007	STDMETHOD(SetPattern)(THIS_ DWORD dwPattern) PURE;
+008	STDMETHOD_(DWORD, GetPattern)(THIS) PURE;
+
+009	STDMETHOD(SetPatternScale)(THIS_ FLOAT fPatternScale) PURE;
+010	STDMETHOD_(FLOAT, GetPatternScale)(THIS) PURE;
+
+011	STDMETHOD(SetWidth)(THIS_ FLOAT fWidth) PURE;
+012	STDMETHOD_(FLOAT, GetWidth)(THIS) PURE;
+
+013	STDMETHOD(SetAntialias)(THIS_ BOOL bAntialias) PURE;
+014	STDMETHOD_(BOOL, GetAntialias)(THIS) PURE;
+
+015	STDMETHOD(SetGLLines)(THIS_ BOOL bGLLines) PURE;
+016	STDMETHOD_(BOOL, GetGLLines)(THIS) PURE;
+
+017	STDMETHOD(End)(THIS) PURE;
+
+018	STDMETHOD(OnLostDevice)(THIS) PURE;
+019	STDMETHOD(OnResetDevice)(THIS) PURE;
+};
+
 
 #endif

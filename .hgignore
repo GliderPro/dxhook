@@ -1,0 +1,7 @@
+syntax: glob
+debug32/
+debug64/
+release32/
+Debug/
+Release/
+*.vcxproj.user
