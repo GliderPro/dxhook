@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -27,8 +28,12 @@ namespace GuiLoaderCS
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void ReleaseHook();
 
-        private InstallHook InstallHookFunc;
-        private ReleaseHook ReleaseHookFunc;
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private delegate Int32 InjectDll(IntPtr hwnd, string targetName, Int32 procId);
+
+        private InstallHook InstallHookFunc = null;
+        private ReleaseHook ReleaseHookFunc = null;
+        private InjectDll InjectDllFunc = null;
 
         public frmMain()
         {
@@ -62,6 +67,14 @@ namespace GuiLoaderCS
         {
             Properties.Settings.Default.DLL_PATH = tbDllPath.Text;
             Properties.Settings.Default.TARGET_NAME = tbProcessName.Text;
+            int idx = 0;
+            foreach (RadioButton control in gbInjectionMethod.Controls)
+            {
+                if (control.Checked)
+                    break;
+                idx++;
+            }
+            Properties.Settings.Default.INJECTION_METHOD = idx;
             Properties.Settings.Default.Save();
 
             if (ReleaseHookFunc != null) ReleaseHookFunc();       
@@ -71,25 +84,48 @@ namespace GuiLoaderCS
         {
             tbDllPath.Text = Properties.Settings.Default.DLL_PATH;
             tbProcessName.Text = Properties.Settings.Default.TARGET_NAME;
+            RadioButton activeRB = (RadioButton) gbInjectionMethod.Controls[Properties.Settings.Default.INJECTION_METHOD];
+            activeRB.Checked = true;
         }
 
         private void button2_Click(object sender, EventArgs e)
         {
             IntPtr hMod = LoadLibrary(tbDllPath.Text);
-            if (hMod != IntPtr.Zero)
+            if (rbManualMap.Checked)
             {
-                IntPtr InstallHookPtr = GetProcAddress(hMod, "InstallHook");
-                IntPtr ReleaseHookPtr = GetProcAddress(hMod, "ReleaseHook");
+                if (hMod != IntPtr.Zero)
+                {
+                    IntPtr InjectDllPtr = GetProcAddress(hMod, "InjectDll");
+                    InjectDllFunc = (InjectDll)Marshal.GetDelegateForFunctionPointer(InjectDllPtr, typeof(InjectDll));
+                }
 
-                InstallHookFunc = (InstallHook)Marshal.GetDelegateForFunctionPointer(InstallHookPtr, typeof(InstallHook));
-                ReleaseHookFunc = (ReleaseHook)Marshal.GetDelegateForFunctionPointer(ReleaseHookPtr, typeof(ReleaseHook));
+                if (InjectDllFunc != null)
+                {
+                    foreach( Process proc in Process.GetProcessesByName(tbProcessName.Text) )
+                    {
+                        Int32 rval = InjectDllFunc(this.Handle, tbDllPath.Text, proc.Id);
+                        Log(string.Format("Injected {0} into process {1}.  rval = {2}\n", tbDllPath.Text, proc.Id, rval));
+                    }
+                    button2.Enabled = false;
+                }
             }
-
-            if (InstallHookFunc != null)
+            else if (rbWindowHook.Checked)
             {
-                InstallHookFunc(this.Handle, tbProcessName.Text);
-                button2.Enabled = false;
-                Log("Created global window hook.  Launch the target process now...\n");
+                if (hMod != IntPtr.Zero)
+                {
+                    IntPtr InstallHookPtr = GetProcAddress(hMod, "InstallHook");
+                    IntPtr ReleaseHookPtr = GetProcAddress(hMod, "ReleaseHook");
+
+                    InstallHookFunc = (InstallHook)Marshal.GetDelegateForFunctionPointer(InstallHookPtr, typeof(InstallHook));
+                    ReleaseHookFunc = (ReleaseHook)Marshal.GetDelegateForFunctionPointer(ReleaseHookPtr, typeof(ReleaseHook));
+                }
+
+                if (InstallHookFunc != null)
+                {
+                    InstallHookFunc(this.Handle, tbProcessName.Text);
+                    button2.Enabled = false;
+                    Log("Created global window hook.  Launch the target process now...\n");
+                }
             }
         }
 
