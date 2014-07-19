@@ -2,6 +2,10 @@ syntax: glob
 debug32/
 debug64/
 release32/
+release64/
 Debug/
 Release/
 *.vcxproj.user
+*.opensdf
+*.sdf
+*.suo
