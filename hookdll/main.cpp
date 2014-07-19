@@ -1,3 +1,5 @@
+#include "LoadLibraryR.h"
+
 #include <windows.h>
 #include <tchar.h>
 #include <stdio.h>
@@ -11,6 +13,7 @@ extern "C" LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, L
 extern "C" LRESULT CALLBACK WinHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 extern "C" void InstallHook(HWND hWnd, const char *pName);
 extern "C" void ReleaseHook();
+extern "C" DWORD InjectDll(HWND hWnd, const char *pDllPath, DWORD procId);
 
 // hooked function typedefs
 typedef IDirect3D9 * (WINAPI *tDirect3DCreate9)(UINT SDKVersion);
@@ -18,6 +21,7 @@ typedef HRESULT (__stdcall *tCreateDevice)(IDirect3D9 *thisPtr, UINT Adapter, D3
 										   D3DPRESENT_PARAMETERS* pPresentationParameters, IDirect3DDevice9** ppReturnedDeviceInterface);
 typedef HRESULT (__stdcall *tEndScene)(IDirect3DDevice9 *thisPtr);
 typedef HRESULT (__stdcall *tReset)(IDirect3DDevice9 *thisPtr, D3DPRESENT_PARAMETERS* pPresentationParameters);
+typedef ULONG (__stdcall *tRelease)(IDirect3DDevice9 *thisPtr);
 typedef BOOL (__stdcall *tCreateProcessA)(LPCSTR lpApplicationName,LPSTR lpCommandLine,LPSECURITY_ATTRIBUTES lpProcessAttributes,
 	LPSECURITY_ATTRIBUTES lpThreadAttributes,BOOL bInheritHandles,DWORD dwCreationFlags,LPVOID lpEnvironment,LPCSTR lpCurrentDirectory,
 	LPSTARTUPINFOA lpStartupInfo,LPPROCESS_INFORMATION lpProcessInformation);
@@ -43,6 +47,7 @@ static DetourXS * dDirect3DCreate9 = NULL;
 static DetourXS * dCreateDevice = NULL;
 static DetourXS * dEndScene = NULL;
 static DetourXS * dReset = NULL;
+static DetourXS * dRelease = NULL;
 static DetourXS * dCreateProcessA = NULL;
 static DetourXS * dCreateProcessW = NULL;
 static TwBar *pBar = NULL;
@@ -50,6 +55,11 @@ static bool drawTwBar = false;
 static float gColor[] = { 1, 0, 0 };
 static HWND targetWindow = NULL;
 static WNDPROC OldWindowProc = NULL;
+
+class hDirect3D9 : IDirect3D9
+{
+
+};
 
 // hooked functions
 tCreateProcessA oCreateProcessA;
@@ -123,6 +133,25 @@ HRESULT __stdcall hReset(IDirect3DDevice9 *thisPtr, D3DPRESENT_PARAMETERS* pPres
 	return rval;
 }
 
+tRelease oRelease;
+ULONG __stdcall hRelease(IDirect3DDevice9 *thisPtr)
+{
+	ULONG rval = 0;
+
+	OutputDebugStringW(L"hRelease() called.\n");
+
+	drawTwBar = false;
+	TwTerminate();	// assume that this is the one and only call to Release
+
+	rval = oRelease(thisPtr);
+
+	if( rval > 0 )
+	{
+		OutputDebugStringW(L"hRelease() returned a nonzero value!!!\n");
+	}
+
+	return rval;
+}
 
 tCreateDevice oCreateDevice;
 HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, 
@@ -143,6 +172,8 @@ HRESULT __stdcall hCreateDevice(IDirect3D9 *thisPtr, UINT Adapter, D3DDEVTYPE De
 			oEndScene = (tEndScene) dEndScene->GetTrampoline();
 			dReset = new DetourXS((void*)vtable[16], hReset);
 			oReset = (tReset) dReset->GetTrampoline();
+			dRelease = new DetourXS((void*)vtable[2], hRelease);
+			oRelease = (tRelease) dRelease->GetTrampoline();
 		}
 
 		TwInit(TW_DIRECT3D9, pD3D9Dev);
@@ -184,36 +215,45 @@ IDirect3D9 * WINAPI hDirect3DCreate9(UINT SDKVersion)
 	return pD3D9;
 }
 
-int WINAPI DllMain(HINSTANCE hInstance, DWORD fdwReason, PVOID pvReserved)
+// You can use this value as a pseudo hinstDLL value (defined and set via ReflectiveLoader.c)
+extern "C" HINSTANCE hAppInstance;
+BOOL WINAPI DllMain( HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpReserved )
 {
-	if (NULL == hins) hins = hInstance;
+	BOOL bReturnValue = TRUE;
 
-	if( DLL_PROCESS_DETACH == fdwReason && inTarget )
-	{
-		if( NULL != OldWindowProc && NULL != targetWindow )
+	if (NULL == hins) hins = hinstDLL;
+
+	switch( dwReason ) 
+	{ 
+	case DLL_QUERY_HMODULE:
+		if( lpReserved != NULL )
+			*(HMODULE *)lpReserved = hAppInstance;
+		break;
+	case DLL_PROCESS_ATTACH:
+		hAppInstance = hinstDLL;
+		//MessageBoxA( NULL, "Hello from DllMain!", "Reflective Dll Injection", MB_OK );
+		break;
+	case DLL_PROCESS_DETACH:
+		if( inTarget && NULL != OldWindowProc && NULL != targetWindow )
 		{
 			SetWindowLongPtr(targetWindow,GWLP_WNDPROC,(LONG_PTR)OldWindowProc);	// not doing this could be bad so do it...
 		}
+		break;
+	case DLL_THREAD_ATTACH:
+	case DLL_THREAD_DETACH:
+		break;
 	}
-	return TRUE;
+	return bReturnValue;
 }
 
 extern "C" LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
 	int handled = 0;
 
-	if(WM_CLOSE == message)
+	if( drawTwBar )
 	{
-		drawTwBar = false;
-		TwTerminate();
-	}
-	else
-	{
-		if( drawTwBar )
-		{
-			// don't bother processing events if the bar isn't being drawn
-			handled = TwEventWin(hWnd,message,wParam,lParam);
-		}
+		// don't bother processing events if the bar isn't being drawn
+		handled = TwEventWin(hWnd,message,wParam,lParam);
 	}
 
 	return handled ? 0 : CallWindowProc(OldWindowProc, hWnd, message, wParam, lParam);
@@ -331,6 +371,98 @@ if (hEventHook != NULL)
 #endif
 }
 
+extern "C" DWORD InjectDll(HWND hWnd, const char *pDllPath, DWORD procId)
+{
+	HANDLE hFile          = NULL;
+	HANDLE hModule        = NULL;
+	HANDLE hProcess       = NULL;
+	HANDLE hToken         = NULL;
+	LPVOID lpBuffer       = NULL;
+	DWORD dwLength        = 0;
+	DWORD dwBytesRead     = 0;
+	TOKEN_PRIVILEGES priv = {0};
+	DWORD rval = ERROR_SUCCESS;
+
+	hFile = CreateFileA( pDllPath, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+	if( hFile == INVALID_HANDLE_VALUE )
+	{
+		OutputDebugStringA("CreateFile failed!");
+		rval = GetLastError();
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		dwLength = GetFileSize( hFile, NULL );
+		if( dwLength == INVALID_FILE_SIZE || dwLength == 0 )
+		{
+			OutputDebugStringA("GetFileSize failed!");
+			rval = GetLastError();
+		}
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		lpBuffer = HeapAlloc( GetProcessHeap(), 0, dwLength );
+		if( !lpBuffer )
+		{
+			OutputDebugStringA("HeapAlloc failed!");
+			rval = GetLastError();
+		}
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		if( ReadFile( hFile, lpBuffer, dwLength, &dwBytesRead, NULL ) == FALSE )
+		{
+			OutputDebugStringA("ReadFile failed!");
+			rval = GetLastError();
+		}
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		if( OpenProcessToken( GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken ) )
+		{
+			priv.PrivilegeCount           = 1;
+			priv.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+			if( LookupPrivilegeValue( NULL, SE_DEBUG_NAME, &priv.Privileges[0].Luid ) )
+				AdjustTokenPrivileges( hToken, FALSE, &priv, 0, NULL, NULL );
+
+			CloseHandle( hToken );
+		}
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		hProcess = OpenProcess( PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, procId );
+		if( !hProcess )
+		{
+			OutputDebugStringA("OpenProcess failed!");
+			rval = GetLastError();
+		}
+	}
+
+	if( rval == ERROR_SUCCESS )
+	{
+		hModule = LoadRemoteLibraryR( hProcess, lpBuffer, dwLength, NULL );
+		if( !hModule )
+		{
+			OutputDebugStringA("LoadRemoteLibraryR failed!");
+			rval = GetLastError();
+		}
+	}
+
+	rval = WaitForSingleObject( hModule, 5000 );
+
+	if( lpBuffer )
+		HeapFree( GetProcessHeap(), 0, lpBuffer );
+
+	if( hProcess )
+		CloseHandle( hProcess );
+
+	return rval;
+}
 
 #if 0
 DECLARE_INTERFACE_(IDirect3D9, IUnknown)

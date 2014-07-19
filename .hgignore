@@ -9,3 +9,4 @@ Release/
 *.opensdf
 *.sdf
 *.suo
+*.user

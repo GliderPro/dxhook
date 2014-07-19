@@ -3,5 +3,6 @@ EXPORTS
 	WinEventProc	@2
 	InstallHook		@3
 	ReleaseHook		@4
+	InjectDll		@5
 SECTIONS
 	.shared SHARED

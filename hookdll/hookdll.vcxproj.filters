@@ -13,6 +13,12 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Header Files\inject">
+      <UniqueIdentifier>{881d12aa-c138-40c8-9f24-6d85a41ed82f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\inject">
+      <UniqueIdentifier>{bda3ff53-6d1a-44d1-8ea9-748604488cf4}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -20,6 +26,15 @@
     </ClCompile>
     <ClCompile Include="detourxs.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="inject\GetProcAddressR.c">
+      <Filter>Source Files\inject</Filter>
+    </ClCompile>
+    <ClCompile Include="inject\LoadLibraryR.c">
+      <Filter>Source Files\inject</Filter>
+    </ClCompile>
+    <ClCompile Include="inject\ReflectiveLoader.c">
+      <Filter>Source Files\inject</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -30,6 +45,18 @@
   <ItemGroup>
     <ClInclude Include="detourxs.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="inject\GetProcAddressR.h">
+      <Filter>Header Files\inject</Filter>
+    </ClInclude>
+    <ClInclude Include="inject\LoadLibraryR.h">
+      <Filter>Header Files\inject</Filter>
+    </ClInclude>
+    <ClInclude Include="inject\ReflectiveDLLInjection.h">
+      <Filter>Header Files\inject</Filter>
+    </ClInclude>
+    <ClInclude Include="inject\ReflectiveLoader.h">
+      <Filter>Header Files\inject</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
